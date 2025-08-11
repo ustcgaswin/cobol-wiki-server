@@ -1,0 +1,29 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+#log folder
+logs/
+
+#project specific foldrs
+
+mlartifacts/
+project_analysis/
+project_storage/
+
+
+#mlflow sqlite db
+
+*.sqlite
+
+
+#env file
+
+*.env
