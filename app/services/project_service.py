@@ -18,6 +18,7 @@ from app.utils.logger import logger
 SERVER_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 PROJECT_STORAGE_DIR = os.path.join(SERVER_ROOT, "project_storage")
 ANALYSIS_STORAGE_DIR = os.path.join(SERVER_ROOT, "project_analysis")
+WIKI_STORAGE_DIR = os.path.join(SERVER_ROOT, "project_wiki")
 
 
 class ProjectCreationError(Exception):
@@ -162,6 +163,7 @@ async def delete_project(db: Session, project_id: UUID):
 
     project_dir = os.path.join(PROJECT_STORAGE_DIR, str(project_id))
     analysis_dir = os.path.join(ANALYSIS_STORAGE_DIR, str(project_id))
+    wiki_dir = os.path.join(WIKI_STORAGE_DIR, str(project_id))
 
     # Perform DB operation first
     db.delete(project)
@@ -190,6 +192,16 @@ async def delete_project(db: Session, project_id: UUID):
     except Exception as e:
         logger.error(f"Error deleting analysis directory {analysis_dir}: {e}", exc_info=True)
         errors.append(f"Failed to remove directory {analysis_dir}: {e}")
+
+    # Delete wiki pages under project_wiki/<id>
+    try:
+        if os.path.exists(wiki_dir):
+            await asyncio.to_thread(shutil.rmtree, wiki_dir, onerror=rmtree_onerror)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        logger.error(f"Error deleting wiki directory {wiki_dir}: {e}", exc_info=True)
+        errors.append(f"Failed to remove directory {wiki_dir}: {e}")
 
     if errors:
         raise ProjectDeletionError(
