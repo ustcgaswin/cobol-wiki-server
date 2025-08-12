@@ -14,9 +14,20 @@ def _make_rag_search_fn(project_id: UUID):
     """
     Returns a callable tool that searches the project's RAG index and formats results.
     """
-    def rag_search(query: str, top_k: int = 20) -> str:
+    def rag_search(query: str = "", top_k: int = 20, **kwargs) -> str:
+        # Be tolerant of different call styles from the agent.
+        q = query or kwargs.get("query") or kwargs.get("input") or kwargs.get("text") or ""
+        q = str(q).strip()
         try:
-            results = search_project(project_id, query, top_k)
+            tk = int(kwargs.get("top_k", top_k))
+        except Exception:
+            tk = top_k
+
+        if not q:
+            return "No query provided."
+
+        try:
+            results = search_project(project_id, q, tk)
         except FileNotFoundError:
             return "No RAG index found."
         except Exception as e:
@@ -24,10 +35,17 @@ def _make_rag_search_fn(project_id: UUID):
 
         if not results:
             return "No results found."
-        return "\n\n".join(
-            f"[{i+1}] {r.get('title', '')}\n{r.get('content', '')}"
-            for i, r in enumerate(results)
-        )
+
+        lines: List[str] = []
+        for i, r in enumerate(results):
+            if isinstance(r, dict):
+                title = r.get("title", "")
+                content = r.get("content", "")
+            else:
+                title = ""
+                content = str(r)
+            lines.append(f"[{i+1}] {title}\n{content}")
+        return "\n\n".join(lines)
     return rag_search
 
 
@@ -35,8 +53,10 @@ def _make_mermaid_fn():
     """
     Returns a callable tool that wraps a Mermaid diagram body in fences.
     """
-    def mermaid(description: str) -> str:
-        desc = (description or "").strip()
+    def mermaid(description: str = "", **kwargs) -> str:
+        # Accept missing or differently named inputs.
+        desc = description or kwargs.get("description") or kwargs.get("input") or kwargs.get("text") or ""
+        desc = str(desc).strip()
         if not desc:
             return "Mermaid description is empty."
         if desc.startswith("```mermaid"):
@@ -127,11 +147,9 @@ Your task: Create a **clear, accurate, and thorough Markdown page** for the give
      • `page_path`
      • likely synonyms, program names, dataset names, or job steps.
    - Use the most relevant and factual details from `rag_search` results.
-   - Number the results as `[RAG 1]`, `[RAG 2]`, etc., in the order retrieved.
 
 3. **References**
    - Include a **References** section at the end.
-   - Cite sources inline using `[RAG X]` where X matches the numbered search result.
 
 4. **Diagrams**
    - If there is an execution flow, component interaction, or data lineage:
