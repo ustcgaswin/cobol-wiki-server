@@ -3,7 +3,7 @@ from sqlmodel import Session, SQLModel, create_engine
 from fastapi import Depends
 from .app_config import settings
 
-engine = create_engine(settings.DATABASE_URL)
+engine = create_engine(settings.DATABASE_URL,echo=True)
 
 
 def create_db_and_tables():

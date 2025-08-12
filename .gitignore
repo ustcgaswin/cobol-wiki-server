@@ -17,7 +17,7 @@ logs/
 mlartifacts/
 project_analysis/
 project_storage/
-
+project_wiki/
 
 #mlflow sqlite db
 

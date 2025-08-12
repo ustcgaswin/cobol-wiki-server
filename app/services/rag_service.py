@@ -429,8 +429,32 @@ def search_project(project_id: UUID, query: str, top_k: int = 20):
     with open(meta_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
 
+    # Load file contents once per file for slicing
+    src_root = _get_project_source_path(project_id)
+    file_cache: Dict[str, str] = {}
+
     results = []
     for idx, score in zip(ids[0], scores[0]):
         if 0 <= idx < len(meta["items"]):
-            results.append({"score": float(score), **meta["items"][idx]})
+            item = meta["items"][idx]
+            rel: str = item["file"]
+            if rel not in file_cache:
+                try:
+                    file_cache[rel] = _read_text(src_root / rel)
+                except Exception:
+                    file_cache[rel] = ""
+            text = file_cache.get(rel, "")
+            s = int(item.get("char_start", 0))
+            e = int(item.get("char_end", 0))
+            snippet = text[s:e] if 0 <= s <= e <= len(text) else ""
+            title = f"{rel} L{item.get('line_start', '?')}-{item.get('line_end', '?')}"
+            results.append({
+                "score": float(score),
+                "file": rel,
+                "line_start": item.get("line_start"),
+                "line_end": item.get("line_end"),
+                "is_code": item.get("is_code"),
+                "title": title,
+                "content": snippet,
+            })
     return results

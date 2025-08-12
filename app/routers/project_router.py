@@ -17,8 +17,10 @@ from app.services.project_service import (
  )
 from app.config.db_config import SessionDep
 from app.models.project_model import WikiStatus
-from app.services import analysis_service, rag_service
+from app.services import analysis_service
 from app.utils.logger import logger
+from pathlib import Path
+from app.services.wiki_tree_service import get_wiki_structure_for_project
 
 
 project_router = APIRouter(
@@ -271,13 +273,14 @@ async def get_project_analysis_result(project_id: UUID, db: SessionDep):
         count=1,
     )
 
-# RAG status under projects
+
+
 @project_router.get(
-    "/{project_id}/rag/status",
-    response_model=APIResponse[Dict[str, Any]],
+    "/{project_id}/wiki/content",
+    response_model=APIResponse[dict],
     status_code=status.HTTP_200_OK,
 )
-async def get_project_rag_status(project_id: UUID, db: SessionDep):
+async def get_project_wiki_content(project_id: UUID, db: SessionDep):
     project = get_project(db, project_id)
     if not project:
         raise HTTPException(
@@ -288,10 +291,54 @@ async def get_project_rag_status(project_id: UUID, db: SessionDep):
                 error=ErrorDetail(code="NOT_FOUND", details="No project with the given ID")
             ).model_dump()
         )
-    status_payload = rag_service.get_embedding_status(project_id)
+
+    if project.wiki_status != WikiStatus.GENERATED:
+        return APIResponse(
+            success=False,
+            message="Wiki not generated yet. Please check back later.",
+            data={},
+            count=0,
+        )
+
+    wiki_dir = Path("project_wiki") / str(project_id)
+    if not wiki_dir.exists():
+        return APIResponse(
+            success=False,
+            message="Wiki directory not found, even though status is GENERATED.",
+            data={},
+            count=0,
+        )
+
+    try:
+        wiki_tree = get_wiki_structure_for_project(project_id)
+    except Exception as e:
+        return APIResponse(
+            success=False,
+            message=f"Failed to load wiki tree: {e}",
+            data={},
+            count=0,
+        )
+
+    def fill_tree_with_content(tree, prefix=""):
+        result = {}
+        for key, value in tree.items():
+            path = f"{prefix}/{key}" if prefix else key
+            if isinstance(value, dict) and value:
+                result[key] = fill_tree_with_content(value, path)
+            else:
+                md_path = wiki_dir / f"{path}.md"
+                if md_path.exists():
+                    with open(md_path, "r", encoding="utf-8") as f:
+                        result[key] = f.read()
+                else:
+                    result[key] = None
+        return result
+
+    wiki_content = fill_tree_with_content(wiki_tree)
+
     return APIResponse(
         success=True,
-        message="RAG status retrieved.",
-        data=status_payload,
-        count=1,
+        message="Wiki content fetched in tree structure.",
+        data=wiki_content,
+        count=len(wiki_content),
     )

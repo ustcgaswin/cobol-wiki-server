@@ -9,7 +9,7 @@ from app.config.db_config import engine
 from app.models.project_model import Project, WikiStatus
 from app.utils.logger import logger
 from app.utils import cobol_utils, jcl_utils, copybook_utils, rexx_utils
-from app.services import rag_service, wiki_tree_service  # RAG first, then analysis
+from app.services import rag_service, wiki_tree_service, wiki_generation_service  # RAG first, then analysis
 
 # Source storage remains here
 PROJECT_STORAGE_PATH = Path("project_storage")
@@ -33,7 +33,8 @@ def get_analysis_file_path(project_id: UUID) -> Path:
 
 def start_project_pipeline(project_id: UUID):
     """
-    Pipeline: build RAG embeddings first, then run analysis (which logs/persists wiki tree).
+    Pipeline: build RAG embeddings first, then run analysis (which logs/persists wiki tree),
+    and finally generate the wiki pages.
     """
     try:
         logger.info(f"Starting project pipeline (RAG -> Analysis) for {project_id}")
@@ -167,8 +168,20 @@ def start_analysis_for_project(project_id: UUID):
                 logger.info(f"Wrote wiki structure to {wiki_out}")
             except Exception as e:
                 logger.error(f"Failed to build/persist wiki structure for project {project.id}: {e}", exc_info=True)
+                project.wiki_status = WikiStatus.FAILED
+                db.add(project)
+                db.commit()
+                return  # Can't proceed to wiki page generation without a tree
 
-            project.wiki_status = WikiStatus.GENERATED
+            # Generate and persist wiki pages under project_wiki/<id> now that the tree is available
+            try:
+                manifest = wiki_generation_service.generate_persist_and_log_wiki(project.id, tree)
+                logger.info(f"Wiki generation completed for project {project.id}. Summary:\n{json.dumps(manifest, indent=2)}")
+                project.wiki_status = WikiStatus.GENERATED
+            except Exception as e:
+                logger.error(f"Failed to generate wiki pages for project {project.id}: {e}", exc_info=True)
+                project.wiki_status = WikiStatus.FAILED
+
             logger.info(f"Successfully completed analysis for project: {project.name} ({project_id})")
 
         except Exception as e:
