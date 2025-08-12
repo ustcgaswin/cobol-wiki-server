@@ -8,6 +8,28 @@ from app.utils.logger import logger
 
 # Root for persisted wiki output relative to the current workspace
 PROJECT_WIKI_BASE_PATH = Path("project_wiki")
+ANALYSIS_BASE_PATH = Path("project_analysis")
+
+
+def _get_project_analysis_json_path(project_id: UUID) -> Path:
+    """
+    Returns project_analysis/<id>/analysis/analysis.json without importing analysis_service (avoid cycles).
+    """
+    return ANALYSIS_BASE_PATH / str(project_id) / "analysis" / "analysis.json"
+
+
+def _load_full_analysis_json(project_id: UUID) -> str:
+    """
+    Loads the raw analysis.json content as a string; returns "" if missing.
+    """
+    p = _get_project_analysis_json_path(project_id)
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
+    except Exception:
+        return ""
 
 
 def _make_rag_search_fn(project_id: UUID):
@@ -129,80 +151,67 @@ def _make_react_agent(project_id: UUID) -> dspy.ReAct:
     Creates a DSPy ReAct agent with callable tools.
     """
     instructions = """
-You are a **Technical Wiki Page Generator**.
+You are a Technical Wiki Page Generator.
 
-Your task: Create a **clear, accurate, and thorough Markdown page** for the given
-`page_title` and `page_path`.
+Goal: Produce a single, polished Markdown page for the given page_title and page_path. Do not include your reasoning or tool-call transcripts; only output the final Markdown content.
 
----
+Core workflow
+1) Research
+   - The full analysis.json is appended to wiki_context. Prefer facts from it; use rag_search to fill gaps.
+   - Call rag_search at least once with varied queries (derived from page_title, page_path, synonyms, job/program names).
+   - Extract only facts that appear in the results. If a detail is missing, state that it’s not available.
+2) Structure
+   - Follow the Page Template below (adapt if needed). Keep sections concise and factual.
+3) Cross-linking
+   - Use wiki_context (tree) to mention related pages and use relative paths.
+4) Diagrams (Mermaid)
+   - Include a Mermaid diagram if there is flow, interaction, or lineage.
+   - Use the mermaid tool and pass only the Mermaid diagram body (no code fences). The tool will wrap it.
+   - Choose the diagram type explicitly (see rules below).
+   - Prefer high-level correctness over speculative detail.
 
-## **Core Requirements**
-1. **Markdown Output**
-   - Always use Markdown with meaningful, hierarchical section headings.
-   - Follow the provided **Page Template** (see below) but adapt if needed.
+Mermaid Diagram Quality Rules
+- General
+  - Do not invent nodes, systems, or fields not supported by rag_search. If uncertain, stay generic (e.g., “External System”) or omit.
+  - Keep it compact (≤ 12–20 nodes). Group related steps with subgraph when helpful.
+  - Start the body with exactly one of: graph TD, graph LR, sequenceDiagram, classDiagram.
+  - No Markdown backticks or extra code fencing inside the body.
+  - You may include Mermaid comments with %% to note unknowns (e.g., %% TODO: exact dataset name).
+- Flowcharts (execution/data flow)
+  - Use graph TD (top-down) unless left-to-right reads better, then graph LR.
+  - Node IDs: lower_snake_case without spaces; human labels in brackets, e.g., job_start["JOB START"].
+  - Decisions: decision_node{"Condition?"}; label branches using |Yes| and |No|.
+  - Use subgraph to group systems/environments (e.g., subgraph Mainframe ... end).
+- Sequence diagrams (interactions)
+  - Begin with participants (e.g., participant Scheduler; participant JCL; participant DB2).
+  - Prefer ->> for synchronous, -> for async. Label each message clearly.
+  - Use alt/opt blocks sparingly and only when supported by evidence.
+- Class/data diagrams (structures)
+  - Use classDiagram for data models/copybooks. Only include fields and relationships confirmed by sources.
+  - Keep unknown structures out rather than guessing.
 
-2. **Information Gathering**
-   - Before writing, call the `rag_search` tool **at least twice** with queries derived from:
-     • `page_title`
-     • `page_path`
-     • likely synonyms, program names, dataset names, or job steps.
-   - Use the most relevant and factual details from `rag_search` results.
+Page Template
+1. Title and Summary
+   - H1 title and a 2–3 sentence summary
+2. Purpose and Scope
+3. Inputs and Outputs
+4. Key Components
+5. Execution Flow
+   - Step-by-step narrative
+   - Include a Mermaid diagram if applicable (use mermaid tool with body only)
+6. Configuration and Parameters
+7. Error Handling and Edge Cases
+8. Dependencies and Relationships
+   - Cross-link related pages using relative paths
+9. How to Run / Examples
 
-3. **References**
-   - Include a **References** section at the end.
 
-4. **Diagrams**
-   - If there is an execution flow, component interaction, or data lineage:
-     • Use the `mermaid` tool to create at least one diagram.
-     • Choose the most appropriate diagram type (flowchart, sequence, etc.).
+Tool usage
+- rag_search(query: str, top_k: int=20) -> string of numbered snippets.
+- mermaid(description: str) -> returns a fenced Mermaid block. Pass only the diagram body (no ```mermaid fences).
 
-5. **Wiki Context**
-   - Use the provided `wiki_context` (Wiki Tree Structure) to:
-     • Cross-link related pages using **relative paths**.
-     • Maintain consistency in terminology and structure.
-
-6. **Factual Accuracy**
-   - Prefer details from `rag_search` over assumptions.
-   - Avoid speculation; if data is missing, state it clearly.
-
----
-
-## **Page Template**
-(Adapt as needed based on the topic)
-
-1. **Title and Summary**
-   - Page title as H1
-   - 2–3 sentence summary of the topic
-
-2. **Purpose and Scope**
-   - Why this exists and what it covers
-
-3. **Inputs and Outputs**
-   - Files, datasets, DB tables, messages, or APIs
-
-4. **Key Components**
-   - Programs, jobs, modules, copybooks with brief descriptions
-
-5. **Execution Flow**
-   - Step-by-step process
-   - Include a **Mermaid diagram** if applicable
-
-6. **Configuration and Parameters**
-   - JCL parameters, environment variables, job cards, scheduler settings
-
-7. **Error Handling and Edge Cases**
-   - Known failure modes and recovery steps
-
-8. **Dependencies and Relationships**
-   - Cross-link related wiki pages using relative paths
-
-9. **How to Run / Examples**
-   - Commands, JCL snippets, sample invocations
-
-10. **References**
-    - List `[RAG X]` citations with their corresponding snippet summaries
-
----
+Output contract
+- Return only the final Markdown page as the content.
 """
 
     signature = dspy.Signature(
@@ -232,6 +241,9 @@ def generate_wiki_page(
     If react_agent is provided, it will be reused.
     """
     wiki_context = _format_wiki_tree(wiki_tree)
+    analysis_raw = _load_full_analysis_json(project_id)
+    if analysis_raw:
+        wiki_context = f"{wiki_context}\n\n=== analysis.json ===\n{analysis_raw}"
     agent = react_agent or _make_react_agent(project_id)
 
     result = agent(
@@ -283,6 +295,9 @@ def generate_and_log_wiki_pages(project_id: UUID, wiki_tree: Dict[str, Any], lea
     results: Dict[str, str] = {}
     react_agent = _make_react_agent(project_id)
     wiki_context = _format_wiki_tree(wiki_tree)
+    analysis_raw = _load_full_analysis_json(project_id)
+    if analysis_raw:
+        wiki_context = f"{wiki_context}\n\n=== analysis.json ===\n{analysis_raw}"
 
     for idx, title in enumerate(titles, start=1):
         try:
@@ -328,6 +343,9 @@ def generate_persist_and_log_wiki(project_id: UUID, wiki_tree: Dict[str, Any]) -
 
     react_agent = _make_react_agent(project_id)
     wiki_context = _format_wiki_tree(wiki_tree)
+    analysis_raw = _load_full_analysis_json(project_id)
+    if analysis_raw:
+        wiki_context = f"{wiki_context}\n\n=== analysis.json ===\n{analysis_raw}"
 
     manifest_pages: List[Dict[str, Any]] = []
 
