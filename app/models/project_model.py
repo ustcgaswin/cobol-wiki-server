@@ -1,7 +1,7 @@
 import enum
 from uuid import uuid4, UUID
 from typing import Optional
-from datetime import date
+from datetime import datetime, timezone
 
 from sqlmodel import Field, SQLModel
 
@@ -20,4 +20,4 @@ class Project(SQLModel, table=True):
     description: Optional[str] = Field(default=None)  # <-- Add this line
     github_url: Optional[str] = Field(default=None)
     wiki_status: WikiStatus = Field(default=WikiStatus.PENDING)
-    created_at: date = Field(default_factory=date.today)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

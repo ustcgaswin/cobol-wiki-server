@@ -5,6 +5,10 @@ from datetime import datetime
 from loguru import logger
 from app.config.app_config import settings
 
+# List of logger name prefixes to ignore in console output
+IGNORED_LOGGER_PREFIXES = ["litellm", "LiteLLM"]
+
+
 class InterceptHandler(logging.Handler):
     """
     Redirects standard logging records to Loguru.
@@ -26,27 +30,43 @@ class InterceptHandler(logging.Handler):
             level, record.getMessage()
         )
 
+
+def console_filter(record):
+    """
+    Filter for console logs: hide logs from ignored libraries.
+    """
+    return not any(
+        record["name"].startswith(prefix) for prefix in IGNORED_LOGGER_PREFIXES
+    )
+
+
+def file_filter(record):
+    """
+    Filter for file logs: log everything.
+    """
+    return True
+
+
 def setup_logging() -> None:
     """
     Configure Loguru and intercept standard logging (uvicorn, FastAPI, etc.).
     Call this before creating your FastAPI app.
     """
-    # This check prevents the logger from being configured twice when using --reload
+    # Prevent configuring logger twice (e.g., when using --reload)
     if "SETUP_LOGGING_COMPLETE" in os.environ:
         return
     os.environ["SETUP_LOGGING_COMPLETE"] = "True"
-    
+
     log_level = settings.LOG_LEVEL.upper()
     log_dir = "logs"
     os.makedirs(log_dir, exist_ok=True)
     run_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_file_path = os.path.join(log_dir, f"app_{run_timestamp}.log")
 
-
     # 1) Remove all existing Loguru handlers
     logger.remove()
 
-    # 2) Add a new handler for stdout
+    # 2) Add a new handler for stdout (console) with filter
     logger.add(
         sys.stdout,
         level=log_level,
@@ -59,9 +79,10 @@ def setup_logging() -> None:
         enqueue=True,        # thread- and process-safe
         backtrace=True,      # show backtrace on exceptions
         diagnose=True,       # variable inspection
+        filter=console_filter,  # 👈 Hide LiteLLM logs in console
     )
 
-    # 3) Add a new handler for file logging
+    # 3) Add a new handler for file logging (no filter)
     logger.add(
         log_file_path,
         level=log_level,
@@ -74,10 +95,10 @@ def setup_logging() -> None:
         enqueue=True,
         backtrace=True,
         diagnose=True,
-        retention="2 days", # Automatically clean up logs older than 2 days
+        retention="2 days",  # Automatically clean up logs older than 2 days
         compression="zip",   # Compress old log files
+        filter=file_filter,  # 👈 Keep all logs in file
     )
-
 
     # 4) Intercept standard logging
     intercept = InterceptHandler()
@@ -87,7 +108,6 @@ def setup_logging() -> None:
     # 5) Make sure uvicorn/fastapi do not add their own handlers
     for pkg in ("uvicorn", "uvicorn.error", "uvicorn.access", "fastapi"):
         log = logging.getLogger(pkg)
-        # Clear any existing handlers and set our intercept handler
         log.handlers.clear()
         log.addHandler(intercept)
         log.propagate = False

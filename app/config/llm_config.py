@@ -12,7 +12,9 @@ llm = dspy.LM(
     f'azure/{deployment_name}',
     api_key=api_key,
     api_base=deployment_url,
-    api_version=version
+    api_version=version,
+    max_tokens=16384
+    
 )
 
 # Embedder setup

@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
@@ -207,11 +208,11 @@ def embeddings_up_to_date(project_id: UUID) -> bool:
         if files_map:
             # Compare current files against recorded files
             current_paths = _iter_project_text_files(project_id)
-            current_set = {str(p.relative_to(src_root)) for p in current_paths}
+            current_set = {p.relative_to(src_root).as_posix() for p in current_paths}
             if set(files_map.keys()) != current_set:
                 return False
             for rel, info in files_map.items():
-                path = src_root / rel
+                path = src_root / Path(rel)
                 if not path.exists() or _file_sha256(path) != info.get("sha256", ""):
                     return False
             return True
@@ -223,21 +224,20 @@ def embeddings_up_to_date(project_id: UUID) -> bool:
                 if rel in seen:
                     continue
                 seen[rel] = True
-                path = src_root / rel
+                path = src_root / Path(rel)
                 if not path.exists() or _file_sha256(path) != item.get("sha256", ""):
                     return False
             current_paths = _iter_project_text_files(project_id)
-            current_set = {str(p.relative_to(src_root)) for p in current_paths}
+            current_set = {p.relative_to(src_root).as_posix() for p in current_paths}
             if set(seen.keys()) != current_set:
                 return False
             return True
     except Exception:
         return False
 
-
 # ---------------- Parallel File Processing ----------------
 def _process_file(path: Path, src_root: Path) -> Tuple[List[str], List[Dict[str, Any]]]:
-    rel = str(path.relative_to(src_root))
+    rel = path.relative_to(src_root).as_posix()
     text = _read_text(path)
     if not text.strip():
         return [], []
@@ -269,9 +269,8 @@ def _process_file(path: Path, src_root: Path) -> Tuple[List[str], List[Dict[str,
             }
         )
     return texts, metas
-
-
 # ---------------- Main Build Function ----------------
+
 def build_embeddings_for_project(project_id: UUID) -> None:
     logger.info(f"[RAG] Building/updating embeddings for {project_id}")
     _write_status(
@@ -299,10 +298,10 @@ def build_embeddings_for_project(project_id: UUID) -> None:
         files = _iter_project_text_files(project_id)
         src_root = _get_project_source_path(project_id)
 
-        # Compute current file hashes
+        # Compute current file hashes (normalize rel paths to POSIX)
         current_files: Dict[str, Dict[str, Any]] = {}
         for p in files:
-            rel = str(p.relative_to(src_root))
+            rel = p.relative_to(src_root).as_posix()
             current_files[rel] = {"sha256": _file_sha256(p), "mtime": int(p.stat().st_mtime)}
 
         # Detect changes: additions, deletions, or hash changes
@@ -413,48 +412,116 @@ def build_embeddings_for_project(project_id: UUID) -> None:
             {"error": str(e), "completed_at": _utc_now_iso()},
         )
 
+# ---------------- Retrieval (Cached and Thread-safe) ----------------
+class _ProjectSearcher:
+    """
+    Thread-safe cached searcher that keeps FAISS index, metadata and file cache
+    in memory, and auto-reloads if underlying files change.
+    """
+    def __init__(self, project_id: UUID, faiss_path: Path, meta_path: Path):
+        self.project_id = project_id
+        self.faiss_path = faiss_path
+        self.meta_path = meta_path
+        self._lock = threading.RLock()
+        self._load()
 
-# ---------------- Retrieval ----------------
-def search_project(project_id: UUID, query: str, top_k: int = 20):
-    faiss_path = get_faiss_index_path(project_id)
-    meta_path = get_faiss_meta_path(project_id)
+    def _load(self) -> None:
+        if not self.faiss_path.exists() or not self.meta_path.exists():
+            raise FileNotFoundError("FAISS index or metadata not found.")
 
-    if not faiss_path.exists() or not meta_path.exists():
-        raise FileNotFoundError("FAISS index or metadata not found.")
+        self.index = faiss.read_index(str(self.faiss_path))
+        with open(self.meta_path, "r", encoding="utf-8") as f:
+            self.meta = json.load(f)
+        self.src_root = _get_project_source_path(self.project_id)
+        self.file_cache: Dict[str, str] = {}
+        self._mtimes = self._current_mtimes()
 
-    index = faiss.read_index(str(faiss_path))
-    query_emb = _normalize_embeddings(embedder([query]))
-    scores, ids = index.search(query_emb, top_k)
+    def _current_mtimes(self) -> Tuple[int, int]:
+        return (
+            int(self.faiss_path.stat().st_mtime),
+            int(self.meta_path.stat().st_mtime),
+        )
 
-    with open(meta_path, "r", encoding="utf-8") as f:
-        meta = json.load(f)
+    def _stale(self) -> bool:
+        try:
+            return self._current_mtimes() != self._mtimes
+        except Exception:
+            # If we cannot stat, assume stale to trigger reload attempt
+            return True
 
-    # Load file contents once per file for slicing
-    src_root = _get_project_source_path(project_id)
-    file_cache: Dict[str, str] = {}
+    def search(self, query: str, top_k: int = 20) -> List[Dict[str, Any]]:
+        with self._lock:
+            if self._stale():
+                # Try to reload if index/meta changed on disk
+                self._load()
 
-    results = []
-    for idx, score in zip(ids[0], scores[0]):
-        if 0 <= idx < len(meta["items"]):
-            item = meta["items"][idx]
-            rel: str = item["file"]
-            if rel not in file_cache:
-                try:
-                    file_cache[rel] = _read_text(src_root / rel)
-                except Exception:
-                    file_cache[rel] = ""
-            text = file_cache.get(rel, "")
-            s = int(item.get("char_start", 0))
-            e = int(item.get("char_end", 0))
-            snippet = text[s:e] if 0 <= s <= e <= len(text) else ""
-            title = f"{rel} L{item.get('line_start', '?')}-{item.get('line_end', '?')}"
-            results.append({
-                "score": float(score),
-                "file": rel,
-                "line_start": item.get("line_start"),
-                "line_end": item.get("line_end"),
-                "is_code": item.get("is_code"),
-                "title": title,
-                "content": snippet,
-            })
-    return results
+            query_emb = _normalize_embeddings(embedder([query]))
+            scores, ids = self.index.search(query_emb, top_k)
+
+            results: List[Dict[str, Any]] = []
+            items = self.meta.get("items", [])
+            for idx, score in zip(ids[0], scores[0]):
+                if 0 <= idx < len(items):
+                    item = items[idx]
+                    rel: str = item["file"]
+                    if rel not in self.file_cache:
+                        try:
+                            self.file_cache[rel] = _read_text(self.src_root / rel)
+                        except Exception:
+                            self.file_cache[rel] = ""
+                    text = self.file_cache.get(rel, "")
+                    s = int(item.get("char_start", 0))
+                    e = int(item.get("char_end", 0))
+                    snippet = text[s:e] if 0 <= s <= e <= len(text) else ""
+                    title = f"{rel} L{item.get('line_start', '?')}-{item.get('line_end', '?')}"
+                    results.append(
+                        {
+                            "score": float(score),
+                            "file": rel,
+                            "line_start": item.get("line_start"),
+                            "line_end": item.get("line_end"),
+                            "is_code": item.get("is_code"),
+                            "title": title,
+                            "content": snippet,
+                        }
+                    )
+            return results
+
+
+_SEARCHERS: Dict[str, _ProjectSearcher] = {}
+_SEARCHERS_LOCK = threading.RLock()
+
+
+def get_project_searcher(project_id: UUID) -> _ProjectSearcher:
+    key = str(project_id)
+    with _SEARCHERS_LOCK:
+        searcher = _SEARCHERS.get(key)
+        if searcher is None:
+            searcher = _ProjectSearcher(
+                project_id, get_faiss_index_path(project_id), get_faiss_meta_path(project_id)
+            )
+            _SEARCHERS[key] = searcher
+        return searcher
+
+
+def clear_project_searcher_cache(project_id: Optional[UUID] = None) -> None:
+    """
+    Clear cached searchers. If project_id is None, clear all.
+    """
+    with _SEARCHERS_LOCK:
+        if project_id is None:
+            _SEARCHERS.clear()
+        else:
+            _SEARCHERS.pop(str(project_id), None)
+
+
+def search_project_cached(project_id: UUID, query: str, top_k: int = 20) -> List[Dict[str, Any]]:
+    """
+    Cached, thread-safe search API.
+    """
+    return get_project_searcher(project_id).search(query, top_k)
+
+
+# Backwards-compatible API that now uses the cached searcher
+def search_project(project_id: UUID, query: str, top_k: int = 20) -> List[Dict[str, Any]]:
+    return search_project_cached(project_id, query, top_k)
