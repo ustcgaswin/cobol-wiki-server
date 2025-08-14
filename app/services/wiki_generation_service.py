@@ -182,8 +182,10 @@ Citations Policy (Required):
 - Do NOT place citations inline within sentences or bullets.
 - After completing each section (an H2/H3 block), append a one-line Sources block summarizing unique sources used in that section.
 - Format exactly: "Sources: [rel/path.ext:start-end, other/file.cbl:10-34]".
-- Collect sources from <cite .../> tags returned by rag_search. Deduplicate and order by first use in that section.
-- Omit a Sources line if the section contains no sourced facts (e.g., purely meta text).
+- Collect sources exclusively from <cite .../> tags returned by rag_search. Deduplicate and order by first use in that section.
+- Bare filenames are INVALID. Every item must include a line range (:start-end). If you don't have line ranges yet, perform additional rag_search calls to obtain them. Do not guess line numbers and do not fabricate citations.
+- Use exact capitalization "Sources:" (never "sources:" or other variants).
+- If a section has no sourced facts or you cannot obtain valid path:start-end citations, omit the Sources line entirely for that section.
 
 Step 1: Retrieve File Content and Detect File Type
 - First, call rag_search with a query to retrieve the full content or key excerpts of the file at page_path (e.g., query: "Full source code for {page_path}").
@@ -262,7 +264,7 @@ Step 3: Research
 - Call rag_search multiple times (at least 3-5 times) with varied, targeted queries to gather comprehensive details (e.g., "Summary of purpose for {page_path}", "Extract DATA DIVISION from {page_path}", "Dependencies and calls in {page_path}", include file-type-specific keywords).
 - Build up knowledge incrementally: Start with overall content, then drill down into specific sections or features.
 - Only include facts supported by sources; if missing, state "Not available".
-- Do not place <cite .../> inline. Instead, aggregate them per section into a single "Sources: [...]" line at the end of that section.
+- Never include <cite .../> tags in the final Markdown. Instead, aggregate them per section into a single Sources line that strictly follows the required format.
 
 Step 4: Diagrams (Mermaid)
 - Include diagrams where they enhance understanding, such as:
@@ -279,13 +281,16 @@ Step 4: Diagrams (Mermaid)
   - Include arrows for directionality (e.g., A --> B for "A leads to B").
   - For complex flows, use subgraphs or styles (e.g., style A fill:#f9f) to highlight key elements.
   - Test for validity: Ensure the syntax is correct Mermaid (e.g., start with 'graph TD;' or 'flowchart LR;').
-  - Integrate into Markdown: After generating, embed the full Mermaid code block in the page (e.g., ```mermaid\ngraph TD;\n...```).
+  - Integrate into Markdown: After generating, embed the full Mermaid code block in the page (e.g., ```mermaid\\ngraph TD;\\n...```).
+
+Validation Checklist (Before Final Output):
+- Every Sources line matches this pattern: Sources: [path.ext:start-end, other/file:10-34]
+- No bare filenames, no lowercase "sources:", no inline <cite .../> tags.
 
 Output Contract:
 - Return only the final Markdown page as the content.
-- Append a "Sources: [...]" line after each section that contains sourced facts, using citations derived from rag_search <cite .../> tags.
+- Append a "Sources: [...]" line after each section that contains sourced facts, using citations derived from rag_search <cite .../> tags. Omit the Sources line if valid citations with line ranges are not available for that section.
 """
-
     signature = dspy.Signature(
         "page_title: str, page_path: str, wiki_context: str -> content: str",
         instructions,
