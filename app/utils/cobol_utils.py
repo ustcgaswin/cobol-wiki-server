@@ -388,38 +388,81 @@ def _parse_sql_command(sql_text: str, line_number: int) -> Dict[str, Any]:
     
     return cmd
 
+
+
 def _extract_procedure_paragraphs(lines: List[str]) -> List[Dict[str, Any]]:
-    """Extracts paragraph headers from the PROCEDURE DIVISION."""
+    """Extracts paragraphs with their content from the PROCEDURE DIVISION."""
     paragraphs = []
     reserved_keywords = {
-        'PROCEDURE', 'DIVISION', 'SECTION', 'INPUT-OUTPUT', 'FILE-CONTROL',
-        'DATA', 'WORKING-STORAGE', 'LINKAGE', 'IDENTIFICATION', 'ENVIRONMENT'
+        # Divisions
+        'IDENTIFICATION', 'ENVIRONMENT', 'DATA', 'PROCEDURE',
+        # Sections
+        'FILE-CONTROL', 'INPUT-OUTPUT', 'FILE', 'WORKING-STORAGE', 'LINKAGE', 'COMMUNICATION', 'REPORT',
+        # Verbs and clauses that can't be paragraph names
+        'ACCEPT', 'ADD', 'CALL', 'CLOSE', 'COMPUTE', 'COPY', 'DELETE', 'DISPLAY', 'DIVIDE',
+        'EVALUATE', 'EXEC', 'EXIT', 'GOBACK', 'IF', 'INSPECT', 'MERGE', 'MOVE', 'MULTIPLY',
+        'OPEN', 'PERFORM', 'READ', 'RELEASE', 'RETURN', 'REWRITE', 'SEARCH', 'SET', 'SORT',
+        'START', 'STOP', 'STRING', 'SUBTRACT', 'UNSTRING', 'WRITE',
+        # Scope terminators
+        'END-ADD', 'END-CALL', 'END-COMPUTE', 'END-DELETE', 'END-DIVIDE', 'END-EVALUATE',
+        'END-IF', 'END-MULTIPLY', 'END-PERFORM', 'END-READ', 'END-RETURN', 'END-REWRITE',
+        'END-SEARCH', 'END-START', 'END-STRING', 'END-SUBTRACT', 'END-UNSTRING', 'END-WRITE',
+        'END-EXEC'
     }
-    
+
     in_procedure_division = False
+    proc_div_lines = []
+
+    # First, find the start of the procedure division and collect its lines
     for i, line in enumerate(lines):
         if 'PROCEDURE DIVISION' in line:
             in_procedure_division = True
+            # The line containing "PROCEDURE DIVISION" might also contain the first paragraph name
+            proc_div_lines.append((i, line))
             continue
-        if not in_procedure_division:
-            continue
+        if in_procedure_division:
+            proc_div_lines.append((i, line))
 
+    if not proc_div_lines:
+        return []
+
+    current_paragraph = None
+    for i, (line_idx, line_content) in enumerate(proc_div_lines):
         # A paragraph name starts in Area A and ends with a period.
-        match = re.match(r'^([A-Z0-9-]+)\.', line.strip())
-        if match:
+        match = re.match(r'^([A-Z0-9-]+)\.', line_content.strip())
+        is_paragraph_header = match and match.group(1) not in reserved_keywords and not line_content.strip().startswith('END ')
+
+        if is_paragraph_header:
+            # If we were in a paragraph, save it before starting the new one.
+            if current_paragraph:
+                paragraphs.append(current_paragraph)
+
+            # Start a new paragraph
             name = match.group(1)
-            if name not in reserved_keywords and not line.strip().startswith('END '):
-                para = {
-                    "name": name,
-                    "line_number": i + 1,
-                    "type": "MAIN" if "MAIN" in name else "SUBROUTINE",
-                    "complexity": 1,  # Placeholder
-                    "called_by": [],
-                    "calls": []
-                }
-                paragraphs.append(para)
-    
+            current_paragraph = {
+                "name": name,
+                "line_number": line_idx + 1,
+                "content_lines": [line_content],
+                "type": "MAIN" if "MAIN" in name else "SUBROUTINE",
+                "complexity": 1,
+                "called_by": [],
+                "calls": []
+            }
+        elif current_paragraph:
+            # Add the line to the content of the current paragraph
+            current_paragraph["content_lines"].append(line_content)
+
+    # Add the last paragraph if it exists
+    if current_paragraph:
+        paragraphs.append(current_paragraph)
+
+    # Post-process to join content lines
+    for para in paragraphs:
+        para["content"] = "\n".join(para.pop("content_lines", []))
+
     return paragraphs
+
+
 
 def _build_call_graph(paragraphs: List[Dict[str, Any]], performs: List[Dict[str, str]]) -> Dict[str, Any]:
     """Builds a call graph from paragraph and PERFORM relationships."""

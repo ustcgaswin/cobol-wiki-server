@@ -1,37 +1,23 @@
-from pathlib import Path
-from uuid import UUID
-from typing import Any, Dict
 import json
+from pathlib import Path
+from typing import Any, Dict
+from uuid import UUID
 
 from app.utils.logger import logger
+from app.utils.wiki_utils import (
+    get_project_analysis_dir,
+    insert_path,
+    slugify,
+)
 
-# New analysis storage base (kept consistent with analysis_service)
-ANALYSIS_BASE_PATH = Path("project_analysis")
-
-
-def _get_project_analysis_dir(project_id: UUID) -> Path:
-    """Constructs the path to where analysis artifacts are written."""
-    return ANALYSIS_BASE_PATH / str(project_id) / "analysis"
 
 def get_wiki_structure_file_path(project_id: UUID) -> Path:
     """Path for persisted wiki tree."""
-    return _get_project_analysis_dir(project_id) / "wiki_structure.json"
+    return get_project_analysis_dir(project_id) / "wiki_structure.json"
 
 
 # ---------------- Wiki structure helpers (deterministic, no LLM) ----------------
 
-def _slugify(text: str) -> str:
-    s = "".join(ch.lower() if ch.isalnum() else "-" for ch in (text or ""))
-    while "--" in s:
-        s = s.replace("--", "-")
-    return s.strip("-") or "untitled"
-
-def _insert_path(tree: Dict[str, Any], path: str) -> None:
-    """Insert a nested path like 'a/b/c' into a dict as nested keys."""
-    parts = [p for p in (path or "").split("/") if p]
-    cur = tree
-    for p in parts:
-        cur = cur.setdefault(p, {})
 
 def build_pages_tree(analysis: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -41,48 +27,52 @@ def build_pages_tree(analysis: Dict[str, Any]) -> Dict[str, Any]:
     tree: Dict[str, Any] = {}
 
     # Overview
-    _insert_path(tree, "overview")
+    insert_path(tree, "overview")
 
     # JCL
     for j in analysis.get("jcl", []) or []:
         file_label = j.get("file") or "unknown.jcl"
-        file_slug = _slugify(file_label)
+        file_slug = slugify(file_label)
         # Jobs
-        for job in (j.get("jobs") or []):
+        for job in j.get("jobs") or []:
             job_name = job.get("name") or "UNNAMED_JOB"
-            job_slug = _slugify(job_name)
-            _insert_path(tree, f"jcl/{file_slug}/{job_slug}")
+            job_slug = slugify(job_name)
+            insert_path(tree, f"jcl/{file_slug}/{job_slug}")
         # Relationships page per file
-        _insert_path(tree, f"jcl/{file_slug}/relationships")
+        insert_path(tree, f"jcl/{file_slug}/relationships")
 
     # COBOL
     for c in analysis.get("cobol", []) or []:
         file_label = c.get("file") or "unknown.cbl"
-        _insert_path(tree, f"cobol/{_slugify(file_label)}")
+        insert_path(tree, f"cobol/{slugify(file_label)}")
 
     # Copybooks
     for cb in analysis.get("copybooks", []) or []:
         file_label = cb.get("file") or "unknown.cpy"
-        _insert_path(tree, f"copybooks/{_slugify(file_label)}")
+        insert_path(tree, f"copybooks/{slugify(file_label)}")
 
     # REXX
     for rx in analysis.get("rexx", []) or []:
         file_label = rx.get("file") or "unknown.rex"
-        file_slug = _slugify(file_label)
-        _insert_path(tree, f"rexx/{file_slug}")
-        subs = ((rx.get("data") or {}).get("control_flow") or {}).get("subroutines") or []
+        file_slug = slugify(file_label)
+        insert_path(tree, f"rexx/{file_slug}")
+        subs = (
+            ((rx.get("data") or {}).get("control_flow") or {}).get("subroutines") or []
+        )
         for s in subs:
-            sub_slug = _slugify(s.get("name") or "subroutine")
-            _insert_path(tree, f"rexx/{file_slug}/sub/{sub_slug}")
+            sub_slug = slugify(s.get("name") or "subroutine")
+            insert_path(tree, f"rexx/{file_slug}/sub/{sub_slug}")
 
     return tree
 
-# Back-compat: keep old name but return the minimal tree
-def build_wiki_structure_from_analysis(analysis: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Return only the nested pages tree (no nav, no page payload).
-    """
-    return build_pages_tree(analysis)
+
+# # Back-compat: keep old name but return the minimal tree
+# def build_wiki_structure_from_analysis(analysis: Dict[str, Any]) -> Dict[str, Any]:
+#     """
+#     Return only the nested pages tree (no nav, no page payload).
+#     """
+#     return build_pages_tree(analysis)
+
 
 def get_wiki_structure_for_project(project_id: UUID) -> Dict[str, Any]:
     """
@@ -94,17 +84,21 @@ def get_wiki_structure_for_project(project_id: UUID) -> Dict[str, Any]:
     if tree_file.exists():
         with open(tree_file, "r", encoding="utf-8") as tf:
             tree = json.load(tf)
-        logger.info(f"Wiki structure (tree) from disk for project {project_id}:\n{json.dumps(tree, indent=2)}")
+        logger.info(
+            f"Wiki structure (tree) from disk for project {project_id}:\n{json.dumps(tree, indent=2)}"
+        )
         return tree
 
-    analysis_file = _get_project_analysis_dir(project_id) / "analysis.json"
+    analysis_file = get_project_analysis_dir(project_id) / "analysis.json"
     if not analysis_file.exists():
         raise FileNotFoundError(f"analysis.json not found at {analysis_file}")
     with open(analysis_file, "r", encoding="utf-8") as f:
         payload = json.load(f)
 
     tree = build_pages_tree(payload)
-    logger.info(f"Wiki structure (tree) for project {project_id}:\n{json.dumps(tree, indent=2)}")
+    logger.info(
+        f"Wiki structure (tree) for project {project_id}:\n{json.dumps(tree, indent=2)}"
+    )
 
     # Persist for future reads
     try:
@@ -113,6 +107,9 @@ def get_wiki_structure_for_project(project_id: UUID) -> Dict[str, Any]:
             json.dump(tree, wf, indent=2)
         logger.info(f"Wrote wiki structure to {tree_file}")
     except Exception as e:
-        logger.error(f"Failed to persist wiki structure for project {project_id}: {e}", exc_info=True)
+        logger.error(
+            f"Failed to persist wiki structure for project {project_id}: {e}",
+            exc_info=True,
+        )
 
     return tree

@@ -7,12 +7,14 @@ from typing import List, Optional
 
 from fastapi import UploadFile
 from sqlmodel import Session, select
+from app.config.db_config import engine
 
 from app.models.project_model import Project
 from app.schema.api_schema import ErrorDetail
 from app.schema.project_schema import ProjectCreate
 from app.utils.git_utils import clone_github_repo_async, rmtree_onerror
 from app.utils.logger import logger
+
 
 # Define the storage directory relative to the server root
 SERVER_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
@@ -210,3 +212,9 @@ async def delete_project(db: Session, project_id: UUID):
         )
 
     return True
+
+
+def get_project_by_id(project_id: UUID) -> Optional[Project]:
+    """Gets a project by its ID, creating a new DB session."""
+    with Session(engine) as db:
+        return get_project(db, project_id)

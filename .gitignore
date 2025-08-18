@@ -27,3 +27,6 @@ project_wiki/
 #env file
 
 *.env
+
+
+node_modules/

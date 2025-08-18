@@ -315,6 +315,20 @@ def _collect_relationships(jobs: List[Dict[str, Any]]) -> Dict[str, Any]:
         job_programs: Set[str] = set()
         job_datasets: Set[str] = set()
 
+        # Process job-level DDs
+        for dd in job.get('job_level_dd_statements', []):
+            dd_name = dd.get('name')
+            dd_params = dd.get('parameters', {})
+            dsn = dd_params.get('DSN')
+            disp = dd_params.get('DISP')
+            if dsn:
+                dataset_references.append({
+                    "job": job_name, "step": None, "dd": dd_name,
+                    "dsn": dsn, "resolved_dsn": None, "disp": disp
+                })
+                if isinstance(dsn, str):
+                    job_datasets.add(dsn)
+
         for step in iter_exec_steps(job.get('items', [])):
             step_name = step.get('name')
             params = step.get('parameters', {})
@@ -322,20 +336,16 @@ def _collect_relationships(jobs: List[Dict[str, Any]]) -> Dict[str, Any]:
             if 'PGM' in params:
                 pgm = params.get('PGM')
                 program_invocations.append({
-                    "job": job_name,
-                    "step": step_name,
-                    "exec_type": "PGM",
-                    "program": pgm
+                    "job": job_name, "step": step_name,
+                    "exec_type": "PGM", "program": pgm
                 })
                 if isinstance(pgm, str):
                     job_programs.add(pgm)
             elif 'PROC' in params:
                 proc = params.get('PROC')
                 program_invocations.append({
-                    "job": job_name,
-                    "step": step_name,
-                    "exec_type": "PROC",
-                    "proc": proc
+                    "job": job_name, "step": step_name,
+                    "exec_type": "PROC", "proc": proc
                 })
                 if isinstance(proc, str):
                     job_programs.add(f"PROC:{proc}")
@@ -345,16 +355,17 @@ def _collect_relationships(jobs: List[Dict[str, Any]]) -> Dict[str, Any]:
                     continue
                 dd_name = dd.get('name')
                 dd_params = dd.get('parameters', {})
-                dsn = dd_params.get('DSN')
+                # FIX: Use the top-level 'dataset_name' key which was already correctly set in the main parser.
+                dsn = dd.get('dataset_name') 
                 resolved = dd_params.get('resolved_dsn')
                 disp = dd_params.get('DISP')
+
+                # CRITICAL FIX: Do not create a reference for non-existent datasets (e.g., DD *)
+                if dsn is None and resolved is None:
+                    continue
                 dataset_references.append({
-                    "job": job_name,
-                    "step": step_name,
-                    "dd": dd_name,
-                    "dsn": dsn,
-                    "resolved_dsn": resolved,
-                    "disp": disp
+                    "job": job_name, "step": step_name, "dd": dd_name,
+                    "dsn": dsn, "resolved_dsn": resolved, "disp": disp
                 })
                 if isinstance(resolved, str):
                     job_datasets.add(resolved)
@@ -370,7 +381,6 @@ def _collect_relationships(jobs: List[Dict[str, Any]]) -> Dict[str, Any]:
         "programs_by_job": programs_by_job,
         "datasets_by_job": datasets_by_job,
     }
-
 
 # --------- Main parsing ----------
 
@@ -428,7 +438,8 @@ def parse_jcl_to_json(jcl_content: str, jcl_lib_dir: Optional[str] = None) -> Di
             comment = {"type": "COMMENT", "text": line}
             container = if_stack[-1]['current_branch'] if if_stack else (current_job['items'] if current_job else None)
             if current_step:
-                current_step.setdefault('dd_statements', []).append(comment)
+                # Per user request, we will ignore step-level comments and not store them.
+                pass
             elif container is not None:
                 container.append(comment)
             elif current_job:
@@ -477,7 +488,8 @@ def parse_jcl_to_json(jcl_content: str, jcl_lib_dir: Optional[str] = None) -> Di
         if stmt_type == 'JOB':
             current_job = {
                 "name": name, "type": "JOB", "raw_card": line,
-                "parameters": params, "comments": [], "items": [], "proc_definitions": {}
+                "parameters": params, "comments": [], "items": [], "proc_definitions": {},
+                "job_level_dd_statements": []
             }
             jobs.append(current_job)
             current_step = None
@@ -503,16 +515,24 @@ def parse_jcl_to_json(jcl_content: str, jcl_lib_dir: Optional[str] = None) -> Di
             last_dd_name = None
 
         elif stmt_type == 'DD':
-            if not current_step:
-                continue
+            if not current_job:
+                continue # Cannot have a DD outside of a job
+
             is_concatenated = (name == '')
             dd_name = name if not is_concatenated else last_dd_name
 
             dd_statement = {
                 "name": dd_name, "type": "DD", "raw_card": line,
-                "parameters": params, "is_concatenated": is_concatenated
+                "parameters": params, "is_concatenated": is_concatenated,
+                "dataset_name": params.get("DSN")
             }
-            current_step['dd_statements'].append(dd_statement)
+
+            # Handle job-level DDs (JOBLIB, etc.) vs step-level DDs
+            if current_step:
+                current_step['dd_statements'].append(dd_statement)
+            else:
+                dd_statement["dataset_name"] = params.get("DSN")
+                current_job['job_level_dd_statements'].append(dd_statement)
 
             if not is_concatenated:
                 last_dd_name = name
