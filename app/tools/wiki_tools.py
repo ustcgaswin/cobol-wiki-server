@@ -8,6 +8,7 @@ import re
 import pathlib
 import json
 
+
 from app.services.rag_service import search_project
 from app.services.project_service import get_project_by_id
 from app.services.db_population_service import get_db_engine
@@ -352,98 +353,130 @@ class TextToSQL(dspy.Signature):
     query = dspy.OutputField(desc="A valid SQLite query that answers the question.")
 
 
+
 def make_db_query_tool(project_id: UUID):
     """
-    Returns a callable tool that converts a natural language question into a
-    SQL query using a hardcoded schema, executes it, and returns the result.
+    Natural language to SQL (read-only).
+    - User supplies ONLY a question (no raw SQL).
+    - LLM generates a single safe SELECT.
+    - Up to 3 retries if generation invalid.
+    - Executes against live SQLite DB and returns markdown or JSON.
     """
-    schema_context = """
-You have access to a SQLite database with the following tables and columns.
-Use these to answer questions about the project's source code.
-When joining tables, you must explicitly reference the foreign key relationships.
+    MAX_ROWS = 500
+    MAX_RETRIES = 3
 
-Table `sourcefile`: Stores information about each source file.
-- id (INTEGER PRIMARY KEY)
-- relative_path (TEXT)
-- file_name (TEXT)
-- file_type (TEXT)
-- content (TEXT)
-- status (TEXT)
+    def _introspect_schema(engine) -> str:
+        with engine.connect() as conn:
+            tables = conn.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';"
+            ).fetchall()
+            lines = []
+            for (tbl,) in tables:
+                cols = conn.exec_driver_sql(f"PRAGMA table_info('{tbl}')").fetchall()
+                col_defs = ", ".join(f"{c[1]} {c[2]}" for c in cols)
+                lines.append(f"Table {tbl}: {col_defs}")
+            return "\n".join(lines)
 
-Table `filerelationship`:
-- id (INTEGER PRIMARY KEY)
-- source_file_id (INTEGER) FK -> sourcefile.id
-- target_file_name (TEXT)
-- relationship_type (TEXT)
-- statement (TEXT)
-- line_number (INTEGER)
+    def _looks_like_sql(text: str) -> bool:
+        return bool(re.match(r"^\s*(SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|PRAGMA)\b", text, re.IGNORECASE))
 
-Table `cobolprogram`:
-- id (INTEGER PRIMARY KEY)
-- file_id (INTEGER) FK -> sourcefile.id
-- program_id_name (TEXT)
-- program_type (TEXT)
+    def _clean_sql(raw: str) -> str:
+        if not raw:
+            return ""
+        s = raw.strip()
+        s = re.sub(r"^```(?:sql)?\s*", "", s, flags=re.IGNORECASE)
+        s = re.sub(r"\s*```$", "", s)
+        parts = [p.strip() for p in s.split(";") if p.strip()]
+        return parts[0] if parts else ""
 
-Table `cobolstatement`:
-- id (INTEGER PRIMARY KEY)
-- program_id (INTEGER) FK -> cobolprogram.id
-- statement_type (TEXT)
-- target (TEXT)
-- content (TEXT)
-- line_number (INTEGER)
+    def _is_safe_select(sql: str) -> bool:
+        if not sql:
+            return False
+        if not re.match(r"^\s*SELECT\b", sql, re.IGNORECASE):
+            return False
+        forbidden = r"\b(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|PRAGMA|ATTACH|REPLACE|TRUNCATE|VACUUM)\b"
+        if re.search(forbidden, sql, re.IGNORECASE):
+            return False
+        if ";" in sql:
+            return False
+        return True
 
-Table `jcljob`:
-- id (INTEGER PRIMARY KEY)
-- file_id (INTEGER) FK -> sourcefile.id
-- job_name (TEXT)
-
-Table `jclstep`:
-- id (INTEGER PRIMARY KEY)
-- job_id (INTEGER) FK -> jcljob.id
-- step_name (TEXT)
-- exec_type (TEXT)
-- exec_target (TEXT)
-
-Table `jclddstatement`:
-- id (INTEGER PRIMARY KEY)
-- job_id (INTEGER) FK -> jcljob.id
-- step_id (INTEGER) FK -> jclstep.id
-- dd_name (TEXT)
-- dataset_name (TEXT)
-- disposition (TEXT)
-"""
+    predictor = dspy.Predict(TextToSQL)
 
     def db_query(question: str = "", **kwargs) -> str:
-        q = question or kwargs.get("question") or kwargs.get("query") or ""
-        q = str(q).strip()
-        if not q:
-            return "No question provided for the database query tool."
+        fmt = (kwargs.get("format") or "markdown").lower()
+        user_q = (question or kwargs.get("question") or kwargs.get("query") or "").strip()
+        if not user_q:
+            return "No question provided."
+        if _looks_like_sql(user_q):
+            return "Provide a natural language question, not raw SQL."
 
         try:
-            text_to_sql_predictor = dspy.Predict(TextToSQL)
-            result = text_to_sql_predictor(context=schema_context, question=q)
-            sql_query = result.query.replace("```sql", "").replace("```", "").strip()
-
             engine = get_db_engine(project_id)
-            with engine.connect() as connection:
-                df = pd.read_sql_query(sql_query, connection)
-
-            if df.empty:
-                return "Query executed successfully, but returned no results."
-            return df.to_markdown(index=False)
-
         except FileNotFoundError:
-            return f"Database for project with ID {project_id} not found."
+            return f"Database for project {project_id} not found."
         except Exception as e:
-            error_sql = "not generated"
-            if 'sql_query' in locals():
-                error_sql = sql_query
-            return f"An error occurred during DB query execution. Query was: `{error_sql}`. Error: {e}"
+            return f"Error opening database engine: {e}"
+
+        try:
+            schema_ctx = _introspect_schema(engine)
+            if not schema_ctx.strip():
+                return "Database has no user tables."
+        except Exception as e:
+            return f"Schema introspection failed: {e}"
+
+        last_err = ""
+        generated_sql = ""
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                result = predictor(context=schema_ctx, question=user_q)
+                generated_sql = _clean_sql(getattr(result, "query", "") or "")
+                if not _is_safe_select(generated_sql):
+                    last_err = f"Unsafe or invalid SQL on attempt {attempt}."
+                    continue
+
+                with engine.connect() as conn:
+                    df = pd.read_sql_query(generated_sql, conn)
+
+                truncated = False
+                total_rows = len(df)
+                if total_rows > MAX_ROWS:
+                    df = df.head(MAX_ROWS)
+                    truncated = True
+
+                if fmt == "json":
+                    return json.dumps({
+                        "question": user_q,
+                        "generated_sql": generated_sql,
+                        "row_count": total_rows,
+                        "returned_rows": len(df),
+                        "truncated": truncated,
+                        "columns": list(df.columns),
+                        "rows": df.to_dict(orient="records")
+                    }, indent=2, default=str)
+
+                # Markdown output
+                table_md = df.to_markdown(index=False) if not df.empty else "_(no rows)_"
+                json_preview = json.dumps(df.to_dict(orient="records"), default=str)  # full (already truncated if needed)
+                meta_line = f"Rows: {total_rows}" + (" (truncated to first 500)" if truncated else "")
+                return (
+                    f"Question: {user_q}\n\n"
+                    f"Generated SQL:\n```sql\n{generated_sql}\n```\n"
+                    f"{meta_line}\n\n"
+                    f"{table_md}\n\n"
+                    f"JSON rows:\n```json\n{json_preview}\n```"
+                )
+            except Exception as e:
+                last_err = f"{type(e).__name__}: {e}"
+
+        return ("Failed to generate executable SELECT after "
+                f"{MAX_RETRIES} attempts.\nLast error: {last_err}\nLast SQL: {generated_sql or 'NONE'}")
 
     return db_query
 
 
-def make_analysis_graph_tool(project_id: UUID):
+
+def make_analysis_graph_tool(project_id: UUID): 
     """
     Returns a callable tool that reads the project's analysis.json file
     and generates a Mermaid dependency graph (validated).
@@ -591,3 +624,63 @@ def make_analysis_graph_tool(project_id: UUID):
         return "\n".join(lines)
 
     return get_analysis_graph
+
+
+
+
+def make_mermaid_validator_tool():
+    """
+    Returns a callable tool that validates Mermaid diagram text using mermaid_validator.js.
+    Usage:
+        mermaid_validate = make_mermaid_validator_tool()
+        mermaid_validate(diagram=\"\"\"graph TD; A-->B;\"\"\")
+    Accepted parameter keys (first non-empty is used):
+        diagram, code, mermaid, text
+    Output:
+        - "OK: diagram is valid." on success
+        - "Invalid Mermaid diagram. Line X: <error>" on parse failure
+        - Informative error message if validator script or Node.js is missing
+    """
+    def _locate_validator():
+        script_name = "mermaid_validator.js"
+        here = pathlib.Path(__file__).resolve()
+        for p in [here.parent, *here.parents]:
+            candidate = p / script_name
+            if candidate.exists():
+                return candidate
+        return None
+
+    def mermaid_validate(diagram: str = "", **kwargs) -> str:
+        src = (diagram or
+               kwargs.get("code") or
+               kwargs.get("mermaid") or
+               kwargs.get("text") or
+               "").strip()
+        if not src:
+            return "No Mermaid diagram provided."
+
+        script_path = _locate_validator()
+        if not script_path:
+            return "Error: mermaid_validator.js not found (searched current and parent directories)."
+
+        try:
+            proc = subprocess.run(
+                ["node", str(script_path)],
+                input=src,
+                text=True,
+                capture_output=True
+            )
+        except FileNotFoundError:
+            return "Error: Node.js runtime not found in PATH."
+        except Exception as e:
+            return f"Unexpected execution error: {e}"
+
+        if proc.returncode == 0:
+            return "OK: diagram is valid."
+
+        line_info = proc.stdout.strip()
+        err_msg = proc.stderr.strip() or "Unknown Mermaid parse error."
+        line_part = f"Line {line_info}: " if line_info else ""
+        return f"Invalid Mermaid diagram. {line_part}{err_msg}"
+
+    return mermaid_validate

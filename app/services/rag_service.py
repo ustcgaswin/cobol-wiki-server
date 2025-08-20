@@ -182,6 +182,10 @@ def _normalize_embeddings(embs: np.ndarray) -> np.ndarray:
 
 
 def _embed_texts(texts: List[str]) -> np.ndarray:
+    """
+    Retained for potential ad-hoc use (not used in main build now).
+    WARNING: Allocates full matrix in memory.
+    """
     if not texts:
         return np.zeros((0, 1), dtype="float32")
     vecs: List[np.ndarray] = []
@@ -191,6 +195,30 @@ def _embed_texts(texts: List[str]) -> np.ndarray:
         vecs.append(arr)
     embs = np.vstack(vecs)
     return _normalize_embeddings(embs)
+
+
+def _build_faiss_index_stream(texts: List[str]) -> faiss.IndexFlatIP:
+    """
+    Stream embeddings batch-by-batch directly into a FAISS index to avoid
+    holding an (N x D) float32 matrix in memory at once.
+    """
+    index: Optional[faiss.IndexFlatIP] = None
+    total = len(texts)
+    if total == 0:
+        # Return empty 1-dim index to keep downstream simple
+        return faiss.IndexFlatIP(1)
+    for i in range(0, total, EMBED_BATCH_SIZE):
+        batch = texts[i : i + EMBED_BATCH_SIZE]
+        if not batch:
+            continue
+        embs = embedder(batch)
+        embs = _normalize_embeddings(embs)
+        if index is None:
+            index = faiss.IndexFlatIP(embs.shape[1])
+        index.add(embs)
+        if (i // EMBED_BATCH_SIZE) % 10 == 0:
+            logger.debug(f"[RAG] Embedded {min(i + len(batch), total)}/{total} chunks")
+    return index if index is not None else faiss.IndexFlatIP(1)
 
 
 # ---------------- Up-to-date Check ----------------
@@ -269,8 +297,8 @@ def _process_file(path: Path, src_root: Path) -> Tuple[List[str], List[Dict[str,
             }
         )
     return texts, metas
-# ---------------- Main Build Function ----------------
 
+# ---------------- Main Build Function ----------------
 def build_embeddings_for_project(project_id: UUID) -> None:
     logger.info(f"[RAG] Building/updating embeddings for {project_id}")
     _write_status(
@@ -371,9 +399,8 @@ def build_embeddings_for_project(project_id: UUID) -> None:
             logger.info(f"[RAG] No embeddable content for project {project_id}.")
             return
 
-        embs = _embed_texts(new_texts)
-        index = faiss.IndexFlatIP(embs.shape[1])
-        index.add(embs)
+        # Stream embeddings directly into FAISS to reduce peak RAM
+        index = _build_faiss_index_stream(new_texts)
         faiss.write_index(index, str(faiss_path))
 
         meta = {
@@ -398,7 +425,7 @@ def build_embeddings_for_project(project_id: UUID) -> None:
             },
         )
         logger.info(
-            f"[RAG] Rebuilt embeddings: {len(new_metas)} vectors for project {project_id}"
+            f"[RAG] Rebuilt embeddings (streamed): {len(new_metas)} vectors for project {project_id}"
         )
 
     except Exception as e:
