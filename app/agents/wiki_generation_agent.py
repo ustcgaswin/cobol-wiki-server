@@ -7,7 +7,7 @@ from app.tools.wiki_tools import (
     make_project_tree_tool,
     make_db_query_tool,
     make_analysis_graph_tool,
-    make_mermaid_validator_tool,  # added
+    make_mermaid_validator_tool,
 )
 
 
@@ -26,6 +26,9 @@ def create_wiki_generation_agent(project_id: UUID, searcher=None) -> dspy.ReAct:
     CRUCIAL WORKFLOW RULE:
     For any structured, relational, or fact-based query (such as program calls, job steps, copybook includes, dataset usage, file relationships, or mappings), you MUST use the db_query tool FIRST before considering rag_search. rag_search should only be used for raw code context, full source retrievals, comment blocs, or when db_query produces no results for the information needed.
 
+    CRUCIAL PATH RESOLUTION RULE:
+    BEFORE calling git_log for any file, you MUST first call project_tree (or have a previously retrieved project_tree result in the current reasoning cycle) to confirm the exact relative path and extension. Never guess file paths. Only invoke git_log with a path that appears verbatim in project_tree output.
+
     MANDATORY MERMAID VALIDATION RULE:
     After composing ANY Mermaid diagram (including those for file pages and any modified version of the project overview diagram), you MUST call mermaid_validate with the exact diagram text. If it returns an error, revise the diagram and re-validate until it returns OK: diagram is valid. Do NOT output a diagram that has not been validated successfully. The get_analysis_graph tool usually returns a validated diagram; if you alter or extend it, re-validate.
 
@@ -40,15 +43,15 @@ def create_wiki_generation_agent(project_id: UUID, searcher=None) -> dspy.ReAct:
     - Start with the `page_title` as the main heading.
     - Write a brief introduction to the project based on the `wiki_context`.
     - Use the `get_analysis_graph()` tool to generate a complete project dependency
-    diagram. This is the main content of the overview. If you adjust it, re-validate.
+      diagram. This is the main content of the overview. If you adjust it, re-validate.
 
     Tools
     - db_query(question: str): PRIMARY source for structured, relational facts.
     - rag_search(query: str, top_k: int=20): Raw code/comment/context only after db_query attempts fail or for contextual prose.
-    - git_log(file_path: str): Commit history for the file (with correct extension).
-    - project_tree(): Directory/file structure.
-    - get_analysis_graph(): Project-wide dependency graph (Mermaid).
-    - mermaid_validate(diagram: str): VALIDATE every Mermaid diagram before output.
+    - project_tree(): Directory/file structure (MUST precede any git_log usage in the same reasoning cycle).
+    - git_log(file_path: str): Commit history for the file (ONLY after project_tree confirms exact path).
+    - get_analysis_graph(): Project-wide dependency graph (Mermaid; validate if modified).
+    - mermaid_validate(diagram: str): VALIDATE EVERY Mermaid diagram before output.
 
     Database Query Guidance (db_query)
     Use db_query first for structured facts:
@@ -87,7 +90,9 @@ def create_wiki_generation_agent(project_id: UUID, searcher=None) -> dspy.ReAct:
     6. Only after structured facts are gathered, use rag_search for raw code or commentary.
 
     Hard Rules
-    - git_log must use exact relative path with its real extension.
+    - ALWAYS call project_tree first (or rely on an already fetched project_tree in the same reasoning cycle) before any git_log invocation to ensure the path is exact.
+    - git_log must use exact relative path with its real extension (never guess).
+    - EVERY Mermaid diagram MUST be validated via mermaid_validate and only emitted after receiving "OK: diagram is valid." If validation fails, fix and re-validate before output.
     - Never fabricate information; all factual claims must trace to sources.
     - Raw <cite> tags never appear inline in prose—only in Sources lines.
     - Every section needing evidence ends with a correctly formatted Sources line unless no sourced facts exist.
@@ -101,7 +106,7 @@ def create_wiki_generation_agent(project_id: UUID, searcher=None) -> dspy.ReAct:
     5. Omit Sources line if no evidence used.
 
     Changelog / Revision History
-    - Use git_log plus rag_search for embedded history comment blocks.
+    - Use git_log (after confirming path via project_tree) plus rag_search for embedded history comment blocks.
     - Present newest-first.
     - Omit only if absolutely nothing found.
 
@@ -113,12 +118,12 @@ def create_wiki_generation_agent(project_id: UUID, searcher=None) -> dspy.ReAct:
     - If complex, split into multiple validated diagrams.
 
     Workflow (file pages)
-    Step 1: project_tree for structure.
+    Step 1: project_tree for structure (REQUIRED before any git_log).
     Step 2: db_query for relationships; rag_search for raw code after.
     Step 3: Detect file type (COBOL, Copybook, JCL, REXX, Generic).
     Step 4: Outline with mandatory Diagram and Changelog sections.
     Step 5: Populate, paraphrase, gather evidence.
-    Step 6: Validate Mermaid diagrams (mermaid_validate) and ensure Sources lines format.
+    Step 6: Validate ALL Mermaid diagrams (mermaid_validate) and ensure Sources lines format.
 
     Section Templates (adapt)
     COBOL: Overview, Environment Division, Data Division, Procedure Division, External Dependencies, Changelog / Revision History, Diagram
@@ -127,7 +132,7 @@ def create_wiki_generation_agent(project_id: UUID, searcher=None) -> dspy.ReAct:
     REXX/Generic: Overview, Inputs & Parameters, Control Flow / Key Routines, External Calls & Dependencies, Error Handling, Changelog / Revision History, Diagram
 
     Final Checks
-    - All Mermaid diagrams validated (no errors).
+    - All Mermaid diagrams validated (each produced "OK: diagram is valid.").
     - Sources lines properly formatted; none appear where no evidence.
     - No raw tool call traces or reasoning in output.
     - Markdown only.
@@ -143,7 +148,7 @@ def create_wiki_generation_agent(project_id: UUID, searcher=None) -> dspy.ReAct:
     project_tree = make_project_tree_tool(project_id)
     db_query = make_db_query_tool(project_id)
     analysis_graph = make_analysis_graph_tool(project_id)
-    mermaid_validate = make_mermaid_validator_tool()  # added
+    mermaid_validate = make_mermaid_validator_tool()
 
     return dspy.ReAct(
         signature,

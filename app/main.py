@@ -1,6 +1,6 @@
 import uuid
 import dspy
-import mlflow
+# import mlflow
 from fastapi import FastAPI, Request, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -16,10 +16,10 @@ from app.routers.project_router import project_router
 async def lifespan(app: FastAPI):
     # Configure libraries that might interfere with logging FIRST.
     # MLflow is a known library to do this.
-    mlflow.set_tracking_uri("http://127.0.0.1:5000")
-    mlflow.set_experiment("DSPy")
-    mlflow.config.enable_async_logging(True)
-    mlflow.dspy.autolog(log_compiles=True, log_evals=True, log_traces_from_compile=True)
+    # mlflow.set_tracking_uri("http://127.0.0.1:5000")
+    # mlflow.set_experiment("DSPy")
+    # mlflow.config.enable_async_logging(True)
+    # mlflow.dspy.autolog(log_compiles=True, log_evals=True, log_traces_from_compile=True)
     
     # NOW, set up our custom logging. This will override any changes made by other libraries.
     setup_logging()

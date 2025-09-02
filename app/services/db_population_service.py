@@ -7,6 +7,11 @@ from sqlmodel import Field, Session, SQLModel, create_engine
 
 from app.utils.logger import logger
 
+from sqlalchemy.orm import registry
+
+analysis_registry = registry()
+AnalysisBase = analysis_registry.generate_base()
+
 # --- Database Setup ---
 
 ANALYSIS_BASE_PATH = Path("project_analysis")
@@ -27,7 +32,7 @@ def get_db_engine(project_id: UUID):
 
 # --- SQLModel Table Definitions ---
 
-class SourceFile(SQLModel, table=True):
+class SourceFile(AnalysisBase,SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     relative_path: str
     file_name: str
@@ -36,7 +41,7 @@ class SourceFile(SQLModel, table=True):
     status: str = "parsed"
 
 
-class FileRelationship(SQLModel, table=True):
+class FileRelationship(AnalysisBase,SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     source_file_id: int = Field(foreign_key="sourcefile.id")
     target_file_name: str
@@ -45,14 +50,14 @@ class FileRelationship(SQLModel, table=True):
     line_number: int
 
 
-class CobolProgram(SQLModel, table=True):
+class CobolProgram(AnalysisBase,SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     file_id: int = Field(foreign_key="sourcefile.id")
     program_id_name: str
     program_type: str
 
 
-class CobolFileControlEntry(SQLModel, table=True):
+class CobolFileControlEntry(AnalysisBase,SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     program_id: int = Field(foreign_key="cobolprogram.id")
     logical_name: str
@@ -64,7 +69,7 @@ class CobolFileControlEntry(SQLModel, table=True):
     raw_statement: str
 
 
-class CobolParagraph(SQLModel, table=True):
+class CobolParagraph(AnalysisBase,SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     program_id: int = Field(foreign_key="cobolprogram.id")
     name: str
@@ -72,7 +77,7 @@ class CobolParagraph(SQLModel, table=True):
     start_line: int
 
 
-class CobolStatement(SQLModel, table=True):
+class CobolStatement(AnalysisBase,SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     paragraph_id: Optional[int] = Field(default=None, foreign_key="cobolparagraph.id")
     program_id: int = Field(foreign_key="cobolprogram.id")
@@ -82,14 +87,14 @@ class CobolStatement(SQLModel, table=True):
     line_number: int
 
 
-class JclJob(SQLModel, table=True):
+class JclJob(AnalysisBase,SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     file_id: int = Field(foreign_key="sourcefile.id")
     job_name: str
     raw_card: str
 
 
-class JclStep(SQLModel, table=True):
+class JclStep(AnalysisBase,SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     job_id: int = Field(foreign_key="jcljob.id")
     step_name: str
@@ -99,7 +104,7 @@ class JclStep(SQLModel, table=True):
     raw_card: str
 
 
-class JclDdStatement(SQLModel, table=True):
+class JclDdStatement(AnalysisBase,SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     job_id: int = Field(foreign_key="jcljob.id")
     step_id: Optional[int] = Field(default=None, foreign_key="jclstep.id")
@@ -111,7 +116,7 @@ class JclDdStatement(SQLModel, table=True):
     raw_card: str
 
 
-class CopybookField(SQLModel, table=True):
+class CopybookField(AnalysisBase,SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     file_id: int = Field(foreign_key="sourcefile.id")
     parent_id: Optional[int] = Field(default=None, foreign_key="copybookfield.id")
@@ -124,14 +129,14 @@ class CopybookField(SQLModel, table=True):
     raw_definition: str
 
 
-class RexxScript(SQLModel, table=True):
+class RexxScript(AnalysisBase,SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     file_id: int = Field(foreign_key="sourcefile.id")
     script_name: str
     script_type: str
 
 
-class RexxSubroutine(SQLModel, table=True):
+class RexxSubroutine(AnalysisBase,SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     script_id: int = Field(foreign_key="rexxscript.id")
     name: str
@@ -139,7 +144,7 @@ class RexxSubroutine(SQLModel, table=True):
     start_line: int
 
 
-class RexxStatement(SQLModel, table=True):
+class RexxStatement(AnalysisBase,SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     subroutine_id: Optional[int] = Field(default=None, foreign_key="rexxsubroutine.id")
     script_id: int = Field(foreign_key="rexxscript.id")
@@ -152,12 +157,11 @@ class RexxStatement(SQLModel, table=True):
 # --- Service Functions ---
 
 def initialize_database(project_id: UUID):
-    """Creates the database and all tables if they don't exist."""
     engine = get_db_engine(project_id)
-    SQLModel.metadata.create_all(engine)
+    analysis_registry.metadata.create_all(engine)
     logger.info(f"Database tables created for project {project_id}")
 
-
+    
 def add_source_file(project_id: UUID, relative_path: str, file_type: str, content: str) -> Optional[SourceFile]:
     """Adds a source file record to the database and returns the model instance."""
     engine = get_db_engine(project_id)
